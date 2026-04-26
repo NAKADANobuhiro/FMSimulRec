@@ -49,7 +49,10 @@ register_tasks.bat を右クリック → 「管理者として実行」
 
 ## STEP 5: 動作テスト（録音当日の前に推奨）
 コマンドプロンプトを開き、以下を実行:
-  python C:\RadioRec\jcba_rec.py fmtonami 30 C:\RadioRec\test.ogg
+
+```
+python C:\RadioRec\jcba_rec.py fmtonami 30 C:\RadioRec\test.ogg
+```
 
 30秒後に C:\RadioRec\test.ogg が存在し、再生できることを確認してください。
 OGGファイル（Opusコーデック）はVLCで再生できます。
