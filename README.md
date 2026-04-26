@@ -1,5 +1,24 @@
 # JCBA 3局自動録音 - セットアップガイド
 
+## 免責事項
+
+:::note warn
+本プログラムは個人の趣味で作成されたものであり、JCBAや関連団体とは一切関係ありません。テストなども十分でなく、実際の動作についても保証はできませんので、使用にあたっては自己責任でお願いします。
+:::
+
+## 目的
+
+このドキュメントは、JCBAの3局（ToyamaCityFM、RadioTakaoka、FMTonami）を自動で録音するためのセットアップ手順を説明します。PythonスクリプトとWindowsタスクスケジューラを使用して、指定した日時に自動的に録音が開始されるように構成します。
+
+## 前提条件
+- Windows PC（Windows 10以降推奨）
+- Python 3.x がインストールされていること
+- インターネット接続が必要
+- 録音時点で PC の電源が入っていること（スリープは可）
+
+---
+
+
 ## ファイル一覧
 
 | ファイル | 説明 |
@@ -13,12 +32,16 @@
 
 ---
 
-## STEP 1: Pythonのインストール（未インストールの場合）
+## STEP 0: Pythonのインストール（未インストールの場合）
 https://www.python.org/downloads/
 - インストール時に「Add Python to PATH」にチェックを入れること
 
+## STEP 1: ファイルのダウンロード
+
+https://github.com/NAKADANobuhiro/FMSimulRec の右側 Release から最新の ZIP ダイルをダウンロードし、展開してください。
+
 ## STEP 2: 全ファイルを C:\RadioRec\ にコピー
-6ファイルすべてを C:\RadioRec\ に配置すること
+展開した 6ファイルすべてを C:\RadioRec\ に配置すること
 
 ## STEP 3: ライブラリのインストール
 install_libs.bat をダブルクリック
@@ -42,6 +65,13 @@ OGGファイル（Opusコーデック）はVLCで再生できます。
 - トークン有効期限は約15秒。初回接続のみ burst=5（5秒バッファ）、再接続時は burst=0（音声重複防止）。
 
 ## 使用後のタスク削除
-  SCHTASKS /DELETE /TN "RadioRec_ToyamaCityFM_0430" /F
-  SCHTASKS /DELETE /TN "RadioRec_Takaoka_0501" /F
-  SCHTASKS /DELETE /TN "RadioRec_FMTonami_0502" /F
+
+```
+SCHTASKS /DELETE /TN "RadioRec_ToyamaCityFM_0430" /F
+SCHTASKS /DELETE /TN "RadioRec_Takaoka_0501" /F
+SCHTASKS /DELETE /TN "RadioRec_FMTonami_0502" /F
+```
+
+## リンク
+
+https://github.com/NAKADANobuhiro/FMSimulRec
