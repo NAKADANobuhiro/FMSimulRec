@@ -1,6 +1,7 @@
 # JCBA 3局自動録音 - セットアップガイド
 
 ## ファイル一覧
+
 | ファイル | 説明 |
 |---|---|
 | jcba_rec.py | 録音メインスクリプト（Python） |
@@ -16,11 +17,11 @@
 https://www.python.org/downloads/
 - インストール時に「Add Python to PATH」にチェックを入れること
 
-## STEP 2: ライブラリのインストール
-install_libs.bat をダブルクリック
-
-## STEP 3: 全ファイルを C:\RadioRec\ にコピー
+## STEP 2: 全ファイルを C:\RadioRec\ にコピー
 6ファイルすべてを C:\RadioRec\ に配置すること
+
+## STEP 3: ライブラリのインストール
+install_libs.bat をダブルクリック
 
 ## STEP 4: タスクスケジューラへの登録
 register_tasks.bat を右クリック → 「管理者として実行」
