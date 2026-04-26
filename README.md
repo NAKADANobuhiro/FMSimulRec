@@ -35,11 +35,10 @@ https://www.python.org/downloads/
 - インストール時に「Add Python to PATH」にチェックを入れること
 
 ## STEP 1: ファイルのダウンロード
-
-https://github.com/NAKADANobuhiro/FMSimulRec の右側 Release から最新の ZIP ダイルをダウンロードし、展開してください。
+https://github.com/NAKADANobuhiro/FMSimulRec の右側 Release の Source code から最新の ZIP ダイルをダウンロードし、展開してください。
 
 ## STEP 2: 全ファイルを C:\RadioRec\ にコピー
-展開した 6ファイルすべてを C:\RadioRec\ に配置すること
+展開したファイルすべてを C:\RadioRec\ に配置すること
 
 ## STEP 3: ライブラリのインストール
 install_libs.bat をダブルクリック
