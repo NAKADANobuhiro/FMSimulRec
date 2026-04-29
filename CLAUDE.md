@@ -92,9 +92,10 @@ FMSimulRec/
 ## jcba_rec.py の主要定数
 
 ```python
-TOKEN_MARGIN  = 5    # トークン期限切れN秒前に再取得（実効接続時間 ≈ 10秒）
-CONNECT_TIMEOUT = 10 # WebSocket接続タイムアウト（秒）
-FETCH_RETRY_WAIT = 5 # トークン取得失敗時のリトライ待機（秒）
+TOKEN_MARGIN    = 5   # トークン期限切れN秒前に接続を閉じる（実効接続時間 ≈ 10秒）
+PREFETCH_BEFORE = 3   # WebSocket窓終了N秒前に次トークンをバックグラウンド取得開始
+CONNECT_TIMEOUT = 10  # WebSocket接続タイムアウト（秒）
+FETCH_RETRY_WAIT = 5  # トークン取得失敗時のリトライ待機（秒）
 ```
 
 ---

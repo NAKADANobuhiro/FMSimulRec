@@ -7,6 +7,7 @@ Example: python jcba_rec.py fmtonami 1800 C:/RadioRec/fmtonami_20260502_1200.ogg
 import sys
 import time
 import json
+import struct
 import threading
 import requests
 import websocket
@@ -15,10 +16,12 @@ import websocket
 # Settings
 # ----------------------------------------------------------------
 API_BASE      = "https://www.jcbasimul.com/api"
-# burst=5 for first connection (buffer), burst=0 for reconnections (no duplicate audio)
 SELECT_STREAM = API_BASE + "/select_stream?station={station_id}&channel=0&quality=high&burst={burst}"
-TOKEN_MARGIN  = 5      # refresh token N seconds before expiry
+TOKEN_MARGIN    = 5    # close WebSocket N seconds before token expiry
+PREFETCH_BEFORE = 3    # start pre-fetching next token N seconds before window ends
+RECONNECT_BURST = 2    # burst seconds on reconnection; OGGStitcher removes the overlap
 CONNECT_TIMEOUT = 10   # WebSocket connect timeout (sec)
+FETCH_RETRY_WAIT = 5   # seconds to wait before retrying after token fetch error
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -27,6 +30,80 @@ HEADERS = {
     "Referer": "https://www.jcbasimul.com/",
     "Origin":  "https://www.jcbasimul.com",
 }
+
+
+# ----------------------------------------------------------------
+# OGG Stitcher — eliminates reconnection gaps
+# ----------------------------------------------------------------
+class OGGStitcher:
+    """
+    Buffers raw WebSocket bytes and writes complete OGG pages to a file,
+    skipping pages whose granule position is already covered by the previous
+    stream.  This allows using burst>0 on reconnection so the new stream
+    overlaps the old one; duplicate audio is dropped automatically.
+
+    The granule values in JCBA streams are absolute broadcast timestamps,
+    so comparison across reconnection boundaries is valid.
+    """
+
+    def __init__(self, outfile):
+        self._out          = outfile
+        self._buf          = b''
+        self._last_granule = 0   # highest granule written so far
+        self.pages_written = 0
+        self.pages_skipped = 0
+
+    @property
+    def last_granule(self):
+        return self._last_granule
+
+    def feed(self, data: bytes):
+        """Accept raw bytes from the WebSocket on_message callback."""
+        self._buf += data
+        self._drain()
+
+    def _drain(self):
+        buf = self._buf
+        while True:
+            if len(buf) < 27:
+                break
+            if buf[:4] != b'OggS':
+                idx = buf.find(b'OggS')
+                if idx == -1:
+                    buf = b''
+                    break
+                buf = buf[idx:]
+                continue
+            num_segs   = buf[26]
+            header_end = 27 + num_segs
+            if len(buf) < header_end:
+                break
+            body_size = sum(buf[27:header_end])
+            total     = header_end + body_size
+            if len(buf) < total:
+                break
+            self._write_page(buf[:total])
+            buf = buf[total:]
+        self._buf = buf
+
+    def _write_page(self, page: bytes):
+        granule = struct.unpack_from('<Q', page, 6)[0]
+        MAX64   = 0xFFFFFFFFFFFFFFFF
+
+        # Header / continuation pages (granule 0 or MAX64): always write.
+        if granule == 0 or granule == MAX64:
+            self._out.write(page)
+            self.pages_written += 1
+            return
+
+        # Audio page: write only if it advances beyond the last written granule.
+        if granule > self._last_granule:
+            self._last_granule = granule
+            self._out.write(page)
+            self.pages_written += 1
+        else:
+            self.pages_skipped += 1   # duplicate from burst overlap, discard
+
 
 # ----------------------------------------------------------------
 # Token fetcher
@@ -42,7 +119,7 @@ def fetch_token(station_id, burst=0):
 
 
 def decode_exp(token):
-    """JWT exp field (no signature verification needed)."""
+    """Extract JWT exp field without signature verification."""
     import base64
     payload_b64 = token.split(".")[1]
     payload_b64 += "=" * (4 - len(payload_b64) % 4)
@@ -61,53 +138,92 @@ class JCBARecorder:
         self._stop        = False
         self._ws          = None
         self._outfile     = None
+        self._stitcher    = None
         self._bytes_recv  = 0
         self._lock        = threading.Lock()
 
     # ------ public ------
     def record(self):
-        self._outfile = open(self.output_path, "wb")
-        start = time.time()
+        self._outfile  = open(self.output_path, "wb")
+        self._stitcher = OGGStitcher(self._outfile)
+        start          = time.time()
         first_connection = True
-        FETCH_RETRY_WAIT = 5   # seconds to wait before retrying after token fetch error
+        prefetched     = None   # (location, token) pre-fetched in background
+
         try:
             while not self._stop:
                 elapsed = time.time() - start
                 if elapsed >= self.duration_sec:
                     break
 
-                # burst=5 on first connection only; 0 on reconnects to avoid duplicate audio
-                burst = 5 if first_connection else 0
-                try:
-                    location, token = fetch_token(self.station_id, burst=burst)
-                except Exception as e:
-                    print(f"[{self.station_id}] Token fetch error: {e} "
-                          f"-- retrying in {FETCH_RETRY_WAIT}s", flush=True)
-                    time.sleep(FETCH_RETRY_WAIT)
-                    continue
+                # Use pre-fetched token if ready; otherwise fetch now
+                if prefetched is not None:
+                    location, token = prefetched
+                    prefetched = None
+                else:
+                    burst = 5 if first_connection else RECONNECT_BURST
+                    try:
+                        location, token = fetch_token(self.station_id, burst=burst)
+                    except Exception as e:
+                        print(f"[{self.station_id}] Token fetch error: {e} "
+                              f"-- retrying in {FETCH_RETRY_WAIT}s", flush=True)
+                        time.sleep(FETCH_RETRY_WAIT)
+                        continue
                 first_connection = False
 
-                exp = decode_exp(token)
-                # how long this token is valid
+                exp       = decode_exp(token)
                 valid_for = exp - time.time() - TOKEN_MARGIN
                 if valid_for < 1:
                     valid_for = 1
 
-                # remaining recording time
-                remaining = self.duration_sec - elapsed
+                remaining   = self.duration_sec - elapsed
                 ws_duration = min(valid_for, remaining)
 
+                st = self._stitcher
                 print(f"[{self.station_id}] "
                       f"elapsed={elapsed:.0f}s  ws_window={ws_duration:.0f}s  "
-                      f"recv={self._bytes_recv//1024}KB  burst={burst}",
+                      f"recv={self._bytes_recv//1024}KB  "
+                      f"skip={st.pages_skipped}pg",
                       flush=True)
 
+                # Pre-fetch the next token in background PREFETCH_BEFORE seconds
+                # before this window ends, so reconnection overhead is near zero
+                prefetch_result = [None]
+                prefetch_error  = [None]
+
+                def _prefetch(delay):
+                    time.sleep(delay)
+                    if self._stop:
+                        return
+                    try:
+                        prefetch_result[0] = fetch_token(
+                            self.station_id, burst=RECONNECT_BURST)
+                    except Exception as e:
+                        prefetch_error[0] = e
+
+                prefetch_delay = max(0, ws_duration - PREFETCH_BEFORE)
+                pf_thread = threading.Thread(
+                    target=_prefetch, args=(prefetch_delay,), daemon=True)
+                pf_thread.start()
+
+                # Run the WebSocket for this window
                 self._run_ws(location, token, ws_duration)
+
+                # Wait briefly for prefetch to finish if it hasn't yet
+                pf_thread.join(timeout=CONNECT_TIMEOUT)
+
+                if prefetch_result[0] is not None:
+                    prefetched = prefetch_result[0]
+                elif prefetch_error[0] is not None:
+                    print(f"[{self.station_id}] Prefetch error: {prefetch_error[0]} "
+                          f"-- will retry at reconnect", flush=True)
 
         finally:
             self._outfile.close()
+            st = self._stitcher
             print(f"[{self.station_id}] Done. "
-                  f"Total={self._bytes_recv//1024}KB  "
+                  f"Total recv={self._bytes_recv//1024}KB  "
+                  f"Pages written={st.pages_written}  skipped={st.pages_skipped}  "
                   f"File={self.output_path}", flush=True)
 
     def stop(self):
@@ -120,7 +236,7 @@ class JCBARecorder:
 
     # ------ internal ------
     def _run_ws(self, location, token, duration_sec):
-        deadline = time.time() + duration_sec
+        deadline   = time.time() + duration_sec
         done_event = threading.Event()
 
         def on_open(ws):
@@ -130,7 +246,7 @@ class JCBARecorder:
         def on_message(ws, message):
             if isinstance(message, bytes):
                 with self._lock:
-                    self._outfile.write(message)
+                    self._stitcher.feed(message)
                     self._bytes_recv += len(message)
             if time.time() >= deadline or self._stop:
                 ws.close()
