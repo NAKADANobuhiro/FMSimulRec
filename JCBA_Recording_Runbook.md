@@ -1,7 +1,7 @@
 # JCBA インターネットサイマルラジオ 自動録音 Runbook
 
 **作成日**: 2026-04-27  
-**最終更新**: 2026-04-27（API仕様変更対応・音声重複バグ修正）  
+**最終更新**: 2026-04-29（録音途切れバグ修正・ログ強化）  
 **対象環境**: Windows 10/11、Python 3.x  
 **対象局・日程**:
 
@@ -180,12 +180,22 @@ SCHTASKS /QUERY /TN "RadioRec_FMTonami_0502"
 
 ## 7. ログの確認
 
-`C:\RadioRec\rec_log.txt` に録音の開始・終了が記録される:
+`C:\RadioRec\rec_log.txt` に録音の開始・終了と Python の詳細出力がすべて記録される:
 
 ```
 [2026/04/30 12:30:01.23] START toyamacityfm
+[toyamacityfm] Start recording 1800s -> C:\RadioRec\toyamacityfm_20260430_1230.ogg
+[toyamacityfm] elapsed=0s   ws_window=10s  recv=0KB    burst=5
+[toyamacityfm] elapsed=10s  ws_window=10s  recv=120KB  burst=0
+[toyamacityfm] elapsed=20s  ws_window=10s  recv=240KB  burst=0
+...
+[toyamacityfm] Token fetch error: ... -- retrying in 5s   ← エラー時はここに記録される
+...
+[toyamacityfm] Done. Total=21600KB  File=C:\RadioRec\toyamacityfm_20260430_1230.ogg
 [2026/04/30 13:00:04.56] END   toyamacityfm
 ```
+
+録音が途中で止まった場合は `rec_log.txt` の `Token fetch error:` や `WS error:` を確認すること。
 
 ---
 
@@ -213,6 +223,12 @@ GET /api/select_stream?station=fmtonami&channel=0&quality=high&burst=5
 **原因**: 再接続のたびに `burst=5` が送られ、過去5秒分の音声が重複して録音される。
 
 **対処**: `jcba_rec.py` を最新版（初回のみ `burst=5`、再接続時は `burst=0`）に差し替える。
+
+### 録音が途中で止まる
+
+**原因**: トークン再取得時にネットワークエラーが発生し、スクリプトが例外終了していた。
+
+**対処**: `jcba_rec.py` を最新版（`fetch_token` に try/except + 5秒リトライ）に差し替える。次回からエラー発生時もリトライして録音を継続する。エラー内容は `rec_log.txt` に `Token fetch error:` として記録される。
 
 ### 録音ファイルが空・極端に小さい
 
@@ -327,3 +343,6 @@ SCHTASKS /CREATE /TN "RadioRec_{任意名}" /TR "C:\RadioRec\{batファイル名
 | 2026-04-27 | WebSocket サブプロトコル `listener.fmplapla.com` 追加（404エラー修正） |
 | 2026-04-27 | 再接続時 `burst=0` 対応（音声ループ修正） |
 | 2026-04-27 | 音声コーデック Vorbis → Opus に記述更新 |
+| 2026-04-29 | `fetch_token` 例外時リトライ追加（録音途切れ修正） |
+| 2026-04-29 | `rec_*.bat` に `>> rec_log.txt 2>&1` 追加（詳細ログ） |
+| 2026-04-29 | `CLAUDE.md` 作成（Claudeセッション引き継ぎ用） |
