@@ -69,6 +69,7 @@ class JCBARecorder:
         self._outfile = open(self.output_path, "wb")
         start = time.time()
         first_connection = True
+        FETCH_RETRY_WAIT = 5   # seconds to wait before retrying after token fetch error
         try:
             while not self._stop:
                 elapsed = time.time() - start
@@ -77,7 +78,13 @@ class JCBARecorder:
 
                 # burst=5 on first connection only; 0 on reconnects to avoid duplicate audio
                 burst = 5 if first_connection else 0
-                location, token = fetch_token(self.station_id, burst=burst)
+                try:
+                    location, token = fetch_token(self.station_id, burst=burst)
+                except Exception as e:
+                    print(f"[{self.station_id}] Token fetch error: {e} "
+                          f"-- retrying in {FETCH_RETRY_WAIT}s", flush=True)
+                    time.sleep(FETCH_RETRY_WAIT)
+                    continue
                 first_connection = False
 
                 exp = decode_exp(token)

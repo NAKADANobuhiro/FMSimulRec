@@ -12,5 +12,5 @@ for /f "tokens=1-2 delims=:." %%a in ("%time: =0%") do set HM=%%a%%b
 set OUTFILE=%SAVE_DIR%\%STATION%_%YMD%_%HM%.ogg
 
 echo [%date% %time%] START %STATION% >> "%SAVE_DIR%\rec_log.txt"
-python "%SCRIPT%" %STATION% %DURATION% "%OUTFILE%"
+python "%SCRIPT%" %STATION% %DURATION% "%OUTFILE%" >> "%SAVE_DIR%\rec_log.txt" 2>&1
 echo [%date% %time%] END   %STATION% >> "%SAVE_DIR%\rec_log.txt"
