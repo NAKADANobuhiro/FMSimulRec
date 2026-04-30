@@ -18,7 +18,7 @@ import websocket
 API_BASE      = "https://www.jcbasimul.com/api"
 SELECT_STREAM = API_BASE + "/select_stream?station={station_id}&channel=0&quality=high&burst={burst}"
 TOKEN_MARGIN    = 5    # close WebSocket N seconds before token expiry
-PREFETCH_BEFORE = 3    # start pre-fetching next token N seconds before window ends
+PREFETCH_BEFORE = 1    # start pre-fetching next token N seconds before window ends
 RECONNECT_BURST = 2    # burst seconds on reconnection; OGGStitcher removes the overlap
 CONNECT_TIMEOUT = 10   # WebSocket connect timeout (sec)
 FETCH_RETRY_WAIT = 5   # seconds to wait before retrying after token fetch error
@@ -43,19 +43,19 @@ class OGGStitcher:
     overlaps the old one; duplicate audio is dropped automatically.
 
     The granule values in JCBA streams are absolute broadcast timestamps,
-    so comparison across reconnection boundaries is valid.
+    so comparison across reconnection boundaries is valid — but ONLY within
+    the same CDN source (serial number).  Different CDN nodes use different
+    timestamp bases (~3.7 hours apart), so granule tracking is maintained
+    per-serial to avoid incorrectly blocking audio from alternate sources.
     """
 
     def __init__(self, outfile):
-        self._out          = outfile
-        self._buf          = b''
-        self._last_granule = 0   # highest granule written so far
-        self.pages_written = 0
-        self.pages_skipped = 0
-
-    @property
-    def last_granule(self):
-        return self._last_granule
+        self._out            = outfile
+        self._buf            = b''
+        self._last_granule   = {}   # serial → highest granule written for that serial
+        self._current_serial = None
+        self.pages_written   = 0
+        self.pages_skipped   = 0
 
     def feed(self, data: bytes):
         """Accept raw bytes from the WebSocket on_message callback."""
@@ -88,7 +88,18 @@ class OGGStitcher:
 
     def _write_page(self, page: bytes):
         granule = struct.unpack_from('<Q', page, 6)[0]
+        serial  = struct.unpack_from('<I', page, 14)[0]
+        htype   = page[5]
         MAX64   = 0xFFFFFFFFFFFFFFFF
+
+        # BOS (beginning of stream): register the serial and always write.
+        if htype & 0x02:
+            self._current_serial = serial
+            if serial not in self._last_granule:
+                self._last_granule[serial] = 0
+            self._out.write(page)
+            self.pages_written += 1
+            return
 
         # Header / continuation pages (granule 0 or MAX64): always write.
         if granule == 0 or granule == MAX64:
@@ -96,9 +107,10 @@ class OGGStitcher:
             self.pages_written += 1
             return
 
-        # Audio page: write only if it advances beyond the last written granule.
-        if granule > self._last_granule:
-            self._last_granule = granule
+        # Audio page: write only if it advances the per-serial granule cursor.
+        last = self._last_granule.get(serial, 0)
+        if granule > last:
+            self._last_granule[serial] = granule
             self._out.write(page)
             self.pages_written += 1
         else:
