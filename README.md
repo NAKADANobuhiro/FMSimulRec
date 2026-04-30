@@ -56,6 +56,17 @@ python C:\RadioRec\jcba_rec.py fmtonami 30 C:\RadioRec\test.ogg
 30秒後に C:\RadioRec\test.ogg が存在し、再生できることを確認してください。
 OGGファイル（Opusコーデック）はVLCで再生できます。
 
+正常動作時のログ例:
+```
+[fmtonami] Start recording 30s -> C:\RadioRec\test.ogg
+[fmtonami] elapsed=0s  ws_window=9s  recv=0KB  skip=0pg
+[fmtonami] elapsed=9s  ws_window=9s  recv=120KB  skip=7pg
+[fmtonami] elapsed=18s  ws_window=9s  recv=240KB  skip=14pg
+[fmtonami] Done. Total recv=360KB  Pages written=XXX  skipped=21  File=C:\RadioRec\test.ogg
+```
+
+`ws_window=9s` および接続ごとに `skip` が約7増加していれば正常です。
+
 ---
 
 ## 注意事項
@@ -63,6 +74,7 @@ OGGファイル（Opusコーデック）はVLCで再生できます。
 - 出力形式はOGG（Opusコーデック）です。VLC Player（無料）で再生できます。
 - 録音の開始・終了・詳細ログは C:\RadioRec\rec_log.txt に記録されます。
 - ネットワークが一時的に切断された場合でも自動リトライして録音を継続します。
+- 再接続時のギャップはOGGStitcherが自動的に解消します（burst=2 のオーバーラップを利用）。
 
 ## 使用後のタスク削除
 

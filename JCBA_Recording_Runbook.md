@@ -1,7 +1,7 @@
 # JCBA インターネットサイマルラジオ 自動録音 Runbook
 
 **作成日**: 2026-04-27  
-**最終更新**: 2026-04-29（録音途切れバグ修正・ログ強化）  
+**最終更新**: 2026-04-30（OGGStitcher導入・再接続ギャップ解消・CDNノード二重化対応）  
 **対象環境**: Windows 10/11、Python 3.x  
 **対象局・日程**:
 
@@ -20,7 +20,7 @@
      │
      ▼
 GET /api/select_stream?station={station_id}&channel=0&quality=high&burst={burst}
-     │   burst=5（初回のみ）/ burst=0（再接続時）
+     │   burst=5（初回のみ）/ burst=2（再接続時）
      │
      │ Response (JSON)
      │   code: 200
@@ -33,15 +33,25 @@ WebSocket 接続 (wss://)
      │ 接続直後に token をテキストメッセージとして送信
      │
      ▼
-バイナリ受信（OGG/Opus）→ ファイルに追記書き込み
+バイナリ受信（OGG/Opus）→ OGGStitcher へ
      │
-     │ ※ tokenは約10秒ごとに自動再取得・再接続（burst=0で再接続）
+     │  OGGStitcher:
+     │   ・OGGページ単位でパース
+     │   ・granule_position をserial番号別に追跡
+     │   ・burst=2 による約2.1秒オーバーラップから重複ページを除去
+     │   → 再接続ギャップなし（シームレス）でファイルへ書き込み
+     │
+     │ ※ tokenは約9秒ごとに自動再取得・再接続（burst=2で再接続）
      ▼
 録音完了 → C:\RadioRec\{station_id}_{YYYYMMDD}_{HHMM}.ogg
 ```
 
 **重要**: 旧来の `musicbird-hls.leanstream.co` (HLS/m3u8) は廃止済み。  
 現在は **Radimo** (WebSocket + OGG/Opusコーデック) に移行している。
+
+### CDNノードの二重化
+
+jcbasimul.com は2つのCDNノードを運用しており、接続のたびに切替が起きる場合がある。各ノードは異なる `serial_number` を使用し、**granule値が約3.7時間分（約6.46億サンプル）ずれている**。OGGStitcher は serial番号をキーとする辞書で granule を追跡するため、ノード切替があっても正常に動作する。
 
 ---
 
@@ -97,11 +107,13 @@ python C:\RadioRec\jcba_rec.py fmtonami 30 C:\RadioRec\test.ogg
 
 ```
 [fmtonami] Start recording 30s -> C:\RadioRec\test.ogg
-[fmtonami] elapsed=0s   ws_window=10s  recv=0KB    burst=5
-[fmtonami] elapsed=10s  ws_window=10s  recv=120KB  burst=0
-[fmtonami] elapsed=20s  ws_window=10s  recv=240KB  burst=0
-[fmtonami] Done. Total=360KB  File=C:\RadioRec\test.ogg
+[fmtonami] elapsed=0s   ws_window=9s  recv=0KB    skip=0pg
+[fmtonami] elapsed=9s   ws_window=9s  recv=120KB  skip=7pg
+[fmtonami] elapsed=18s  ws_window=9s  recv=240KB  skip=14pg
+[fmtonami] Done. Total recv=360KB  Pages written=XXX  skipped=21  File=C:\RadioRec\test.ogg
 ```
+
+- `skip=Npg` は OGGStitcher が除去した重複ページの累計数。1接続ごとに約7増加するのが正常。
 
 30秒後に `test.ogg` が作成され、VLC Player で再生して音が出ることを確認する。
 
@@ -127,17 +139,19 @@ SCHTASKS /QUERY /TN "RadioRec_FMTonami_0502"
 1. GET /api/select_stream?station={id}&channel=0&quality=high&burst={burst}
       └─ location (WSS URL) と token (JWT) を取得
          初回: burst=5（5秒バッファ付き）
-         再接続: burst=0（音声重複を防ぐ）
+         再接続: burst=2（2秒バッファ → OGGStitcher が重複除去）
 
 2. JWT の exp フィールドから有効期限を計算
-      └─ 有効期限 - 5秒 = WebSocket 接続維持時間（約10秒）
+      └─ 有効期限 - TOKEN_MARGIN(5秒) = WebSocket 接続維持時間（約9秒）
+         ※ PREFETCH_BEFORE=1 により窓終了1秒前から次トークンをバックグラウンド取得
 
 3. WebSocket 接続（サブプロトコル: listener.fmplapla.com）
       └─ 接続直後に token をテキストメッセージとして送信
 
-4. バイナリデータ（OGG/Opus）を受信 → ファイルに追記書き込み
+4. バイナリデータ（OGG/Opus）を受信 → OGGStitcher 経由でファイルへ書き込み
+      └─ OGGStitcher が granule 重複ページを除去し、シームレスな音声を保証
 
-5. 有効期限5秒前に WebSocket を閉じ、burst=0 で 1〜4 を繰り返す
+5. 有効期限5秒前に WebSocket を閉じ、burst=2 で 1〜4 を繰り返す
 
 6. 合計録音時間に達したら終了
 ```
@@ -147,10 +161,13 @@ SCHTASKS /QUERY /TN "RadioRec_FMTonami_0502"
 | パラメータ | 値 |
 |---|---|
 | token 有効期限 | 約15秒（exp - iat = 15） |
-| リフレッシュタイミング | 有効期限の5秒前（= 約10秒ごと） |
+| リフレッシュタイミング | 有効期限の5秒前（= 約9〜10秒ごと） |
 | 定数 `TOKEN_MARGIN` | `5`（秒）← jcba_rec.py 内で変更可 |
+| 定数 `PREFETCH_BEFORE` | `1`（秒）← 窓終了1秒前にバックグラウンド取得開始 |
+| 実効 ws_window | 約9秒（= 15 - TOKEN_MARGIN - PREFETCH_BEFORE） |
 | 初回 burst | `5`（秒）|
-| 再接続時 burst | `0`（音声重複防止）|
+| 再接続時 burst | `2`（秒、= `RECONNECT_BURST`）|
+| 1接続あたりのオーバーラップ | 約2.1秒（7ページ × 300ms/ページ）|
 
 ---
 
@@ -185,15 +202,18 @@ SCHTASKS /QUERY /TN "RadioRec_FMTonami_0502"
 ```
 [2026/04/30 12:30:01.23] START toyamacityfm
 [toyamacityfm] Start recording 1800s -> C:\RadioRec\toyamacityfm_20260430_1230.ogg
-[toyamacityfm] elapsed=0s   ws_window=10s  recv=0KB    burst=5
-[toyamacityfm] elapsed=10s  ws_window=10s  recv=120KB  burst=0
-[toyamacityfm] elapsed=20s  ws_window=10s  recv=240KB  burst=0
+[toyamacityfm] elapsed=0s   ws_window=9s  recv=0KB    skip=0pg
+[toyamacityfm] elapsed=9s   ws_window=9s  recv=120KB  skip=7pg
+[toyamacityfm] elapsed=18s  ws_window=9s  recv=240KB  skip=14pg
 ...
 [toyamacityfm] Token fetch error: ... -- retrying in 5s   ← エラー時はここに記録される
 ...
-[toyamacityfm] Done. Total=21600KB  File=C:\RadioRec\toyamacityfm_20260430_1230.ogg
+[toyamacityfm] Done. Total recv=21600KB  Pages written=6000  skipped=1400  File=C:\RadioRec\toyamacityfm_20260430_1230.ogg
 [2026/04/30 13:00:04.56] END   toyamacityfm
 ```
+
+- `ws_window=9s`: 正常値は約9秒。大幅に短い場合は PREFETCH_BEFORE の値を確認。
+- `skip=Npg`: 接続回数 × 7 程度が正常。0のままなら burst=RECONNECT_BURST が効いていない可能性。
 
 録音が途中で止まった場合は `rec_log.txt` の `Token fetch error:` や `WS error:` を確認すること。
 
@@ -259,6 +279,22 @@ pip install websocket-client
 
 VLC Player（https://www.videolan.org/）をインストールして再生する。  
 Windows Media Player では標準では再生できないため注意。
+
+### ログの `skip=0pg` が増えない（OGGStitcher が機能していない）
+
+**確認**: `jcba_rec.py` の `RECONNECT_BURST` が `2` 以上になっているか確認する。`burst=0` のままだとオーバーラップがないため skip が増えない（かつギャップが残る）。
+
+### ログの `ws_window` が7秒以下になっている
+
+**原因**: `PREFETCH_BEFORE` が大きすぎる。バックグラウンド取得したトークンは `PREFETCH_BEFORE` 秒後に使われるため、その分だけ有効期限が縮む。
+
+**対処**: `PREFETCH_BEFORE = 1` に設定する（実効窓 = 15 - 5 - 1 = 9秒）。
+
+### 録音ファイルの途中で音声が数秒間抜ける（ログに `skip` が急増している）
+
+**原因**: CDNノードが切り替わり、granule値が大きく異なるノードからの音声が誤って除去された可能性がある。旧バージョン（`_last_granule` が辞書でなく整数）のスクリプトを使用している。
+
+**対処**: `jcba_rec.py` を最新版（`_last_granule` が `{}` の辞書）に差し替える。
 
 ---
 
@@ -346,3 +382,8 @@ SCHTASKS /CREATE /TN "RadioRec_{任意名}" /TR "C:\RadioRec\{batファイル名
 | 2026-04-29 | `fetch_token` 例外時リトライ追加（録音途切れ修正） |
 | 2026-04-29 | `rec_*.bat` に `>> rec_log.txt 2>&1` 追加（詳細ログ） |
 | 2026-04-29 | `CLAUDE.md` 作成（Claudeセッション引き継ぎ用） |
+| 2026-04-30 | OGGStitcher 導入（granule追跡による再接続ギャップ解消） |
+| 2026-04-30 | `RECONNECT_BURST=2` 導入（再接続時に2秒オーバーラップ取得） |
+| 2026-04-30 | `PREFETCH_BEFORE=3→1` 変更（実効ws_windowを9秒に回復） |
+| 2026-04-30 | OGGStitcher の `_last_granule` を辞書化（CDNノード二重化対応） |
+| 2026-04-30 | ログ形式を `burst=X` → `skip=Xpg` に変更 |
