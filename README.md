@@ -67,6 +67,14 @@ OGGファイル（Opusコーデック）はVLCで再生できます。
 
 `ws_window=9s` および接続ごとに `skip` が約7増加していれば正常です。
 
+## STEP 6: MP3 への変換(必要に応じて)
+OGGファイルをMP3に変換するには、以下のコマンドを使用してください（ffmpegが必要）:
+```
+ffmpeg -i input.ogg -codec:a libmp3lame -qscale:a 2 output.mp3
+(例)
+ffmpeg -i toyamacityfm_20260430_1230.ogg -codec:a libmp3lame -q:a 2 toyamacityfm_20260430_1230.mp3
+```
+
 ---
 
 ## 注意事項
