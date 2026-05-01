@@ -20,6 +20,10 @@ SELECT_STREAM = API_BASE + "/select_stream?station={station_id}&channel=0&qualit
 TOKEN_MARGIN    = 5    # close WebSocket N seconds before token expiry
 PREFETCH_BEFORE = 1    # start pre-fetching next token N seconds before window ends
 RECONNECT_BURST = 2    # burst seconds on reconnection; OGGStitcher removes the overlap
+ESTIMATED_GAP   = 0.7  # estimated audio gap per reconnection (sec); used to filter
+                       # cross-CDN burst overlap.  Set slightly below the measured
+                       # average (~0.86 s) so rounding errs towards a tiny overlap
+                       # (inaudible) rather than a gap.
 CONNECT_TIMEOUT = 10   # WebSocket connect timeout (sec)
 FETCH_RETRY_WAIT = 5   # seconds to wait before retrying after token fetch error
 
@@ -55,16 +59,16 @@ class OGGStitcher:
 
     SAMPLE_RATE = 48_000   # Opus standard sample rate (Hz)
 
-    def __init__(self, outfile, reconnect_burst=2):
-        self._out                   = outfile
-        self._buf                   = b''
-        self._last_granule          = {}    # serial → highest granule written for that serial
-        self._current_serial        = None
-        self._audio_started         = set() # serials that have had ≥1 audio page written
-        self._last_audio_write_time = None  # wall-clock time of last written audio page
-        self._reconnect_burst       = reconnect_burst
-        self.pages_written          = 0
-        self.pages_skipped          = 0
+    def __init__(self, outfile, reconnect_burst=2, estimated_gap=0.7):
+        self._out             = outfile
+        self._buf             = b''
+        self._last_granule    = {}    # serial → highest granule written for that serial
+        self._current_serial  = None
+        self._audio_started   = set() # serials that have had ≥1 audio page written
+        self._reconnect_burst = reconnect_burst
+        self._estimated_gap   = estimated_gap
+        self.pages_written    = 0
+        self.pages_skipped    = 0
 
     def feed(self, data: bytes):
         """Accept raw bytes from the WebSocket on_message callback."""
@@ -116,23 +120,30 @@ class OGGStitcher:
             self.pages_written += 1
             return
 
-        # Audio page: first occurrence of a new serial after a reconnection?
-        # Set the skip threshold based on measured wall-clock gap so the burst
-        # overlap from a cross-CDN switch is filtered out.
+        # Audio page: first occurrence of a new serial?
+        # If we have already written audio for other serials, this is a cross-CDN
+        # reconnection.  Set a skip threshold so the burst overlap is filtered out.
+        #
+        # The wall-clock gap between the last written page and the first burst page
+        # is NOT the audio gap: burst pages are pre-buffered and arrive almost
+        # instantly after the new WebSocket opens (~50 ms), while the actual audio
+        # gap is the full connection-establishment time (~0.9 s).  We therefore use
+        # a fixed estimate (ESTIMATED_GAP) rather than a wall-clock measurement.
+        #
+        # skip_samples = (burst - estimated_gap) × sample_rate
+        # → positions the start of the new stream just after the old stream ended,
+        #   with a small overlap (~0.2 s) rather than a gap.
         if serial not in self._audio_started:
-            self._audio_started.add(serial)
-            if self._last_audio_write_time is not None:
-                gap = time.time() - self._last_audio_write_time
+            if self._audio_started:   # non-empty → at least one serial seen before → reconnection
                 skip_samples = max(0, int(
-                    (self._reconnect_burst - gap) * self.SAMPLE_RATE))
+                    (self._reconnect_burst - self._estimated_gap) * self.SAMPLE_RATE))
                 self._last_granule[serial] = granule + skip_samples
-                # Fall through to the normal granule check below.
+            self._audio_started.add(serial)
 
         # Audio page: write only if it advances the per-serial granule cursor.
         last = self._last_granule.get(serial, 0)
         if granule > last:
             self._last_granule[serial] = granule
-            self._last_audio_write_time = time.time()
             self._out.write(page)
             self.pages_written += 1
         else:
@@ -179,7 +190,9 @@ class JCBARecorder:
     # ------ public ------
     def record(self):
         self._outfile  = open(self.output_path, "wb")
-        self._stitcher = OGGStitcher(self._outfile, reconnect_burst=RECONNECT_BURST)
+        self._stitcher = OGGStitcher(self._outfile,
+                                     reconnect_burst=RECONNECT_BURST,
+                                     estimated_gap=ESTIMATED_GAP)
         start          = time.time()
         first_connection = True
         prefetched     = None   # (location, token) pre-fetched in background
