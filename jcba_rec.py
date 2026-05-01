@@ -42,20 +42,29 @@ class OGGStitcher:
     stream.  This allows using burst>0 on reconnection so the new stream
     overlaps the old one; duplicate audio is dropped automatically.
 
-    The granule values in JCBA streams are absolute broadcast timestamps,
-    so comparison across reconnection boundaries is valid — but ONLY within
-    the same CDN source (serial number).  Different CDN nodes use different
-    timestamp bases (~3.7 hours apart), so granule tracking is maintained
-    per-serial to avoid incorrectly blocking audio from alternate sources.
+    Same-CDN reconnection (same serial number):
+      Granule comparison per serial filters the burst overlap correctly.
+
+    Cross-CDN reconnection (new serial number, ~3.7h granule base difference):
+      Granule comparison cannot be used across serials.  Instead, the wall-clock
+      gap between the last written audio page and the first page of the new stream
+      is measured, and a per-serial skip threshold is computed so only audio after
+      the gap is kept.  This eliminates the ~1.1s repetition that occurred at each
+      CDN node switch.
     """
 
-    def __init__(self, outfile):
-        self._out            = outfile
-        self._buf            = b''
-        self._last_granule   = {}   # serial → highest granule written for that serial
-        self._current_serial = None
-        self.pages_written   = 0
-        self.pages_skipped   = 0
+    SAMPLE_RATE = 48_000   # Opus standard sample rate (Hz)
+
+    def __init__(self, outfile, reconnect_burst=2):
+        self._out                   = outfile
+        self._buf                   = b''
+        self._last_granule          = {}    # serial → highest granule written for that serial
+        self._current_serial        = None
+        self._audio_started         = set() # serials that have had ≥1 audio page written
+        self._last_audio_write_time = None  # wall-clock time of last written audio page
+        self._reconnect_burst       = reconnect_burst
+        self.pages_written          = 0
+        self.pages_skipped          = 0
 
     def feed(self, data: bytes):
         """Accept raw bytes from the WebSocket on_message callback."""
@@ -107,10 +116,23 @@ class OGGStitcher:
             self.pages_written += 1
             return
 
+        # Audio page: first occurrence of a new serial after a reconnection?
+        # Set the skip threshold based on measured wall-clock gap so the burst
+        # overlap from a cross-CDN switch is filtered out.
+        if serial not in self._audio_started:
+            self._audio_started.add(serial)
+            if self._last_audio_write_time is not None:
+                gap = time.time() - self._last_audio_write_time
+                skip_samples = max(0, int(
+                    (self._reconnect_burst - gap) * self.SAMPLE_RATE))
+                self._last_granule[serial] = granule + skip_samples
+                # Fall through to the normal granule check below.
+
         # Audio page: write only if it advances the per-serial granule cursor.
         last = self._last_granule.get(serial, 0)
         if granule > last:
             self._last_granule[serial] = granule
+            self._last_audio_write_time = time.time()
             self._out.write(page)
             self.pages_written += 1
         else:
@@ -157,7 +179,7 @@ class JCBARecorder:
     # ------ public ------
     def record(self):
         self._outfile  = open(self.output_path, "wb")
-        self._stitcher = OGGStitcher(self._outfile)
+        self._stitcher = OGGStitcher(self._outfile, reconnect_burst=RECONNECT_BURST)
         start          = time.time()
         first_connection = True
         prefetched     = None   # (location, token) pre-fetched in background

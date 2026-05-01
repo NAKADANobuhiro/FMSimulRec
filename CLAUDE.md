@@ -70,6 +70,7 @@ wss://os1308.radimo.smen.biz:443/socket?burst={burst}
 | 再接続のたびに約0.9秒の無音ギャップ | WebSocketハンドシェイク＋サーバー起動時間による音声欠落 | OGGStitcher導入 + burst=2 で2.1秒オーバーラップ取得し重複除去 |
 | OGGStitcher がCDNノード切替時に全音声をブロック | 2つのCDNノード（異なるserial番号）がgranuleの基準点を約3.7時間分ずらして使用。単一カーソルでは切替後の全ページが「重複」と判定された | `_last_granule` を `serial → granule` の辞書に変更し、serial番号ごとに独立追跡 |
 | PREFETCH_BEFORE=3 でWebSocket窓が7秒に短縮 | バックグラウンド取得したトークンが3秒後に使用されるため、exp基準で窓が縮む | PREFETCH_BEFORE=1 に変更 → 実効窓 ≈ 9秒 |
+| CDNノード切替時に約1.1秒の音声繰り返し | 新serialの `_last_granule` が 0 に初期化されるため burst オーバーラップがフィルタされず全量書き込まれる | 新serialの初回音声ページ到着時に壁時計でgapを計測し、`_last_granule[serial] = first_granule + (burst-gap)*48000` でしきい値を設定 |
 
 ---
 
