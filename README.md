@@ -74,6 +74,7 @@ ffmpeg -i input.ogg -codec:a libmp3lame -qscale:a 2 output.mp3
 (例)
 ffmpeg -i toyamacityfm_20260430_1230.ogg -codec:a libmp3lame -q:a 2 toyamacityfm_20260430_1230.mp3
 ffmpeg -i radiotakaoka_20260501_1300.ogg -codec:a libmp3lame -q:a 2 radiotakaoka_20260501_1300.mp3
+ffmpeg -i fmtonami_20260502_1200.ogg -codec:a libmp3lame -q:a 2 fmtonami_20260502_1200.mp3
 ```
 
 ---
