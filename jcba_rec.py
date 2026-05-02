@@ -49,26 +49,34 @@ class OGGStitcher:
     Same-CDN reconnection (same serial number):
       Granule comparison per serial filters the burst overlap correctly.
 
-    Cross-CDN reconnection (new serial number, ~3.7h granule base difference):
-      Granule comparison cannot be used across serials.  Instead, the wall-clock
-      gap between the last written audio page and the first page of the new stream
-      is measured, and a per-serial skip threshold is computed so only audio after
-      the gap is kept.  This eliminates the ~1.1s repetition that occurred at each
-      CDN node switch.
+    Cross-CDN reconnection (different serial number, ~3.7h granule base difference):
+      Granule comparison cannot be used across serials.  Instead a fixed audio-gap
+      estimate (ESTIMATED_GAP) is used to compute a per-reconnection skip threshold:
+
+        skip_samples = (reconnect_burst - estimated_gap) × sample_rate
+
+      This skip is applied both when a serial is seen for the first time AND whenever
+      the active CDN node switches back to a previously-seen serial (A→B→A pattern).
+      Without re-applying on the return switch, burst pages would all pass the granule
+      check (cursor is ~9 s behind), causing ~1.8 s of repeated audio per transition.
+
+      Note: wall-clock time is NOT used — burst pages arrive almost instantly after
+      the WebSocket opens (~50 ms TCP), while the actual audio gap is ~0.9 s.
     """
 
     SAMPLE_RATE = 48_000   # Opus standard sample rate (Hz)
 
     def __init__(self, outfile, reconnect_burst=2, estimated_gap=0.7):
-        self._out             = outfile
-        self._buf             = b''
-        self._last_granule    = {}    # serial → highest granule written for that serial
-        self._current_serial  = None
-        self._audio_started   = set() # serials that have had ≥1 audio page written
-        self._reconnect_burst = reconnect_burst
-        self._estimated_gap   = estimated_gap
-        self.pages_written    = 0
-        self.pages_skipped    = 0
+        self._out                 = outfile
+        self._buf                 = b''
+        self._last_granule        = {}    # serial → highest granule written for that serial
+        self._current_serial      = None
+        self._audio_started       = set() # serials that have had ≥1 audio page written
+        self._last_written_serial = None  # serial of the last written audio page
+        self._reconnect_burst     = reconnect_burst
+        self._estimated_gap       = estimated_gap
+        self.pages_written        = 0
+        self.pages_skipped        = 0
 
     def feed(self, data: bytes):
         """Accept raw bytes from the WebSocket on_message callback."""
@@ -120,30 +128,48 @@ class OGGStitcher:
             self.pages_written += 1
             return
 
-        # Audio page: first occurrence of a new serial?
-        # If we have already written audio for other serials, this is a cross-CDN
-        # reconnection.  Set a skip threshold so the burst overlap is filtered out.
+        # Detect whether this is a CDN switch (same or new serial).
+        #
+        # Case A — new serial (first time seen):
+        #   Cross-CDN switch to a node we've never connected to before.
+        #   Apply skip threshold so the burst overlap is filtered out.
+        #
+        # Case B — previously-seen serial, but different from last written serial:
+        #   CDN switched back to a serial we've already used (A→B→A or B→A→B).
+        #   Granule comparison alone would accept ALL burst pages because the serial's
+        #   _last_granule cursor is far behind the new stream (~9 s of recording ago),
+        #   producing ~1.8 s of repeated audio.  Re-apply the same skip threshold.
         #
         # The wall-clock gap between the last written page and the first burst page
-        # is NOT the audio gap: burst pages are pre-buffered and arrive almost
-        # instantly after the new WebSocket opens (~50 ms), while the actual audio
-        # gap is the full connection-establishment time (~0.9 s).  We therefore use
-        # a fixed estimate (ESTIMATED_GAP) rather than a wall-clock measurement.
+        # is NOT the audio gap: burst pages arrive almost instantly after the new
+        # WebSocket opens (~50 ms), while the actual audio gap is the full
+        # connection-establishment time (~0.9 s).  We use a fixed estimate
+        # (ESTIMATED_GAP) rather than a wall-clock measurement.
         #
         # skip_samples = (burst - estimated_gap) × sample_rate
         # → positions the start of the new stream just after the old stream ended,
         #   with a small overlap (~0.2 s) rather than a gap.
-        if serial not in self._audio_started:
+        is_new_serial  = serial not in self._audio_started
+        is_cdn_switch  = (not is_new_serial and
+                          self._last_written_serial is not None and
+                          self._last_written_serial != serial)
+
+        if is_new_serial or is_cdn_switch:
             if self._audio_started:   # non-empty → at least one serial seen before → reconnection
                 skip_samples = max(0, int(
                     (self._reconnect_burst - self._estimated_gap) * self.SAMPLE_RATE))
-                self._last_granule[serial] = granule + skip_samples
-            self._audio_started.add(serial)
+                current  = self._last_granule.get(serial, 0)
+                proposed = granule + skip_samples
+                if proposed > current:
+                    self._last_granule[serial] = proposed
+            if is_new_serial:
+                self._audio_started.add(serial)
 
         # Audio page: write only if it advances the per-serial granule cursor.
         last = self._last_granule.get(serial, 0)
         if granule > last:
-            self._last_granule[serial] = granule
+            self._last_granule[serial]    = granule
+            self._last_written_serial     = serial
             self._out.write(page)
             self.pages_written += 1
         else:

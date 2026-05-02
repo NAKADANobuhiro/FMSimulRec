@@ -72,6 +72,7 @@ wss://os1308.radimo.smen.biz:443/socket?burst={burst}
 | PREFETCH_BEFORE=3 でWebSocket窓が7秒に短縮 | バックグラウンド取得したトークンが3秒後に使用されるため、exp基準で窓が縮む | PREFETCH_BEFORE=1 に変更 → 実効窓 ≈ 9秒 |
 | CDNノード切替時に約1.1秒の音声繰り返し | 新serialの `_last_granule` が 0 に初期化されるため burst オーバーラップがフィルタされず全量書き込まれる | `ESTIMATED_GAP=0.7s` の固定値でskip_samplesを計算してしきい値を設定（壁時計計測は不正確なため使用しない） |
 | CDNノード切替時に約0.7秒のギャップ（前修正の回帰） | 壁時計gap（TCP接続時間≈50ms）を音声ギャップ（≈0.9s）と誤用。over-skipが発生 | 壁時計計測を廃止し固定値 `ESTIMATED_GAP=0.7s` に変更（測定平均0.86sより少し小さく設定し重複方向に安全に倒す） |
+| CDNノード切替（A→B→A返却）時に約1.8秒の音声繰り返し | skip適用が `_audio_started` 未登録の初回のみ。2回目以降（既知serialへの切替）はskipされず、granule比較もcursorが≈9秒古いため全burstページが書き込まれた。70回のCDN遷移で合計127.6秒の過剰が確認された | `_last_written_serial` を追加し、serial変化を毎回検出。既知serialへの復帰時も同じskip_samplesを適用（`proposed > current` の場合のみ更新） |
 
 ---
 
@@ -116,6 +117,7 @@ OGGStitcher はこれを活用してギャップを埋める:
 3. serial番号ごとに「最後に書き込んだgranule」を記録（`_last_granule[serial]`）
 4. `granule > last_granule[serial]` のページのみファイルに書き込み、重複は破棄
 5. BOS（ストリーム開始）ページと granule=0/MAX64 のヘッダーページは常に書き込む
+6. CDN切替（serialが `_last_written_serial` と異なる場合）を毎回検出し、既知serialへの復帰時も `skip_samples` を再適用する
 
 ### CDNノードの二重化について
 
