@@ -73,6 +73,7 @@ wss://os1308.radimo.smen.biz:443/socket?burst={burst}
 | CDNノード切替時に約1.1秒の音声繰り返し | 新serialの `_last_granule` が 0 に初期化されるため burst オーバーラップがフィルタされず全量書き込まれる | `ESTIMATED_GAP=0.7s` の固定値でskip_samplesを計算してしきい値を設定（壁時計計測は不正確なため使用しない） |
 | CDNノード切替時に約0.7秒のギャップ（前修正の回帰） | 壁時計gap（TCP接続時間≈50ms）を音声ギャップ（≈0.9s）と誤用。over-skipが発生 | 壁時計計測を廃止し固定値 `ESTIMATED_GAP=0.7s` に変更（測定平均0.86sより少し小さく設定し重複方向に安全に倒す） |
 | CDNノード切替（A→B→A返却）時に約1.8秒の音声繰り返し | skip適用が `_audio_started` 未登録の初回のみ。2回目以降（既知serialへの切替）はskipされず、granule比較もcursorが≈9秒古いため全burstページが書き込まれた。70回のCDN遷移で合計127.6秒の過剰が確認された | `_last_written_serial` を追加し、serial変化を毎回検出。既知serialへの復帰時も同じskip_samplesを適用（`proposed > current` の場合のみ更新） |
+| CDNスイッチ時に全音声が欠落（ギャップだらけ）- fmtonami_20260502_1200.ogg で確認 | `is_cdn_switch` 判定を全音声ページで評価しているが `_last_written_serial` はページ書き込み成功時のみ更新。スキップされたページでは更新されないため判定が毎ページ True になり続け、skip_samplesを毎ページ累積加算 → カーソルが際限なく前進 → 接続全体の音声を廃棄。30分録音で48箇所・合計約17分の欠落 | `if is_new_serial or is_cdn_switch:` ブロックの末尾で即座に `_last_written_serial = serial` をラッチ。以降のページでは `_last_written_serial == serial` となり `is_cdn_switch = False` に落ちる |
 
 ---
 

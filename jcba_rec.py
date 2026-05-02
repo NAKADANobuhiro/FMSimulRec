@@ -164,12 +164,18 @@ class OGGStitcher:
                     self._last_granule[serial] = proposed
             if is_new_serial:
                 self._audio_started.add(serial)
+            # Latch immediately: prevent is_cdn_switch from firing again on the next
+            # pages of the same connection while those burst pages are being skipped.
+            # Without this, _last_written_serial would stay as the OLD serial until
+            # a page finally passes the granule check, causing the skip threshold to
+            # advance by skip_samples on every page → runaway skip → audio gaps.
+            self._last_written_serial = serial
 
         # Audio page: write only if it advances the per-serial granule cursor.
         last = self._last_granule.get(serial, 0)
         if granule > last:
-            self._last_granule[serial]    = granule
-            self._last_written_serial     = serial
+            self._last_granule[serial] = granule
+            self._last_written_serial  = serial   # keep in sync after each write too
             self._out.write(page)
             self.pages_written += 1
         else:
