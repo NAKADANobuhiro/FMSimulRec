@@ -1,7 +1,7 @@
 # JCBA インターネットサイマルラジオ 自動録音 Runbook
 
 **作成日**: 2026-04-27  
-**最終更新**: 2026-04-30（OGGStitcher導入・再接続ギャップ解消・CDNノード二重化対応）  
+**最終更新**: 2026-05-02（CDNスイッチ繰り返し修正・ラッチバグ修正）  
 **対象環境**: Windows 10/11、Python 3.x  
 **対象局・日程**:
 
@@ -39,6 +39,8 @@ WebSocket 接続 (wss://)
      │   ・OGGページ単位でパース
      │   ・granule_position をserial番号別に追跡
      │   ・burst=2 による約2.1秒オーバーラップから重複ページを除去
+     │   ・CDNノード切替（_last_written_serialが変化）を毎回検出し
+     │     既知serialへの復帰時も skip_samples を再適用
      │   → 再接続ギャップなし（シームレス）でファイルへ書き込み
      │
      │ ※ tokenは約9秒ごとに自動再取得・再接続（burst=2で再接続）
@@ -51,7 +53,12 @@ WebSocket 接続 (wss://)
 
 ### CDNノードの二重化
 
-jcbasimul.com は2つのCDNノードを運用しており、接続のたびに切替が起きる場合がある。各ノードは異なる `serial_number` を使用し、**granule値が約3.7時間分（約6.46億サンプル）ずれている**。OGGStitcher は serial番号をキーとする辞書で granule を追跡するため、ノード切替があっても正常に動作する。
+jcbasimul.com は2つのCDNノードを運用しており、接続のたびに切替が起きる場合がある。各ノードは異なる `serial_number` を使用し、**granule値が約3.7時間分（約6.46億サンプル）ずれている**。OGGStitcher は以下の方法でノード切替に対応する:
+
+- `_last_granule` を serial番号をキーとする辞書で管理し、ノード間のgranuleずれによる誤「重複」判定を回避する
+- `_last_written_serial` で直前に書き込んだ serial を追跡し、**serial が変化するたびに**（初回・復帰どちらも）`skip_samples` を適用してburstオーバーラップを除去する
+
+`_last_written_serial` のラッチ（CDNスイッチ検出ブロック末尾での即時更新）は特に重要。ラッチを怠ると、skip中のページで `_last_written_serial` が古いserialのままになり、次のページも全て「CDNスイッチ」と誤判定される。この状態では `_last_granule` のカーソルが毎ページ `skip_samples` ずつ前進し続け、接続全体の音声が廃棄される。
 
 ---
 
@@ -290,11 +297,33 @@ Windows Media Player では標準では再生できないため注意。
 
 **対処**: `PREFETCH_BEFORE = 1` に設定する（実効窓 = 15 - 5 - 1 = 9秒）。
 
-### 録音ファイルの途中で音声が数秒間抜ける（ログに `skip` が急増している）
+### 録音ファイルに数〜数十秒のギャップが多数ある（ログの `skip` が異常に多い）
 
-**原因**: CDNノードが切り替わり、granule値が大きく異なるノードからの音声が誤って除去された可能性がある。旧バージョン（`_last_granule` が辞書でなく整数）のスクリプトを使用している。
+`rec_log.txt` の Done 行で `Pages written` が正常値（30分なら約6500〜7000）を大幅に下回り、`skipped` が逆に多い場合はスキップ過多。
 
-**対処**: `jcba_rec.py` を最新版（`_last_granule` が `{}` の辞書）に差し替える。
+**正常値の目安**:
+| 録音時間 | Pages written（正常） | skipped（正常） |
+|---|---|---|
+| 30分 | 6500〜7000 | 700〜1100 |
+| 60分 | 13000〜14000 | 1400〜2400 |
+
+**主な原因と対処**:
+
+1. **`_last_granule` が辞書でなく整数**（旧バージョン）  
+   CDNノード切替後、高いgranuleのノードを経由すると、以降の全ページが「重複」と誤判定される。  
+   → `jcba_rec.py` を最新版に差し替える。
+
+2. **`_last_written_serial` のラッチ漏れ**  
+   CDNスイッチ検出後、スキップ中のページで `_last_written_serial` が更新されず、毎ページ「スイッチ」と誤判定される。結果として `_last_granule` カーソルが毎ページ `skip_samples`（≈1.3秒）ずつ前進し続け、接続全体が廃棄される。  
+   → `jcba_rec.py` を最新版（`if is_new_serial or is_cdn_switch:` ブロック末尾でラッチ）に差し替える。
+
+**確認コマンド（Pythonスクリプトで直接検証）**:
+
+```
+python C:\RadioRec\jcba_rec.py fmtonami 30 C:\RadioRec\test.ogg
+```
+
+Done 行で `Pages written` が約 100〜130（30秒分）、`skipped` が約 21 なら正常。
 
 ---
 
@@ -366,7 +395,7 @@ SCHTASKS /CREATE /TN "RadioRec_{任意名}" /TR "C:\RadioRec\{batファイル名
 | WSサブプロトコル | `listener.fmplapla.com` |
 | 音声形式 | OGG/Opus（JWT の `sub` フィールド: `/fmtonami/0/high.ogg`） |
 | token 認証 | JWT (RS256)、WebSocket 接続直後に最初のメッセージとして送信 |
-| burst パラメータ | 初回=5（秒バッファ）、再接続=0（重複防止） |
+| burst パラメータ | 初回=5（秒バッファ）、再接続=2（OGGStitcherが重複除去） |
 
 ---
 
@@ -387,3 +416,7 @@ SCHTASKS /CREATE /TN "RadioRec_{任意名}" /TR "C:\RadioRec\{batファイル名
 | 2026-04-30 | `PREFETCH_BEFORE=3→1` 変更（実効ws_windowを9秒に回復） |
 | 2026-04-30 | OGGStitcher の `_last_granule` を辞書化（CDNノード二重化対応） |
 | 2026-04-30 | ログ形式を `burst=X` → `skip=Xpg` に変更 |
+| 2026-05-01 | CDNスイッチ初回のみ skip 適用 → A→B→A 返却時に約1.8秒繰り返し発生 |
+| 2026-05-01 | `_last_written_serial` 追加・CDNスイッチを毎回検出し既知serialへの復帰時も skip_samples を再適用 |
+| 2026-05-02 | `_last_written_serial` ラッチ漏れバグを修正（スイッチ検出ブロック末尾で即時更新）。fmtonami_20260502_1200.ogg で48箇所・約17分の欠落が発生した反省から |
+| 2026-05-02 | Runbook 更新：CDNノード二重化の説明拡充、トラブルシューティング強化、Pages written 正常値目安追加 |
